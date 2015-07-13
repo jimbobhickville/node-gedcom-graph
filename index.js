@@ -1,51 +1,142 @@
-var creds = require("./.creds");
+var fs = require('fs');
+var Gedcom = require('gedcom-stream');
+var moment = require('moment');
+var csv = require('fast-csv');
+var exec = require('child_process').exec;
 
-var graph = require("seraph")(creds);
 
-var moment = require("moment");
-
-var fs = require('fs'),
-    Gedcom = require('gedcom-stream'),
-    gedcom = new Gedcom();
+/* TODO:
+- figure out if neo4j has any special date types that we could leverage
+- better code organization, more custom tag parsers
+    - NAME should split into given and surname probably
+- figure out neo4j indexes to speed up lookups
+- export as a library somehow?
+- profile for obvious speed issues
+- store to temp db, stop neo4j, move folders, keep backup of old one, start neo4j again
+- better temp location for csvs
+- rather than opts.importer, opts.neo4jbin to point us to all of the binaries
+- logging?
+- break various pieces out into separate components, looser coupling
+*/
 
 var tag_names = require('./const/tags');
 var temple_codes = require('./const/temples');
 
-/* TODO:
+var opts = require('nomnom')
+    .option('input', {
+        abbr: 'i',
+        help: 'Path to the gedcom file you want to parse'
+    })
+    .option('output', {
+        abbr: 'o',
+        required: true,
+        help: 'Path to the neo4j data folder you wish to replace'
+    })
+    .option('importer', {
+        abbr: 'e',
+        default: 'neo4j-import',
+        help: 'Path to the neo4j-import tool (if not in $PATH)'
+    })
+    .parse();
 
-- figure out if neo4j has any special date types that we could leverage
-- find existing record before inserting, update if exists (benchmark vs complete re-import)
-- extrapolate relationships automatically
-- figure out if neo4j has a bulk import tool that might make this faster, rest API is sloooooowwww for bulk
-- better way to provide credentials.  surely something is on npm for this already
-- better code organization, more custom tag parsers
-    - NAME should split into given and surname probably
-- figure out neo4j indexes to speed up lookups
-- better CLI args, allow piping in gedcom like `node index.js < file.ged`
-- export as a library somehow?
-*/
+var start = moment();
+function record_duration() {
+    var end = moment();
+    var elapsed = end.diff(start);
+    console.log('Time elapsed: ' + moment.duration(elapsed, 'ms').humanize());
+}
 
+
+var import_args = [opts.importer, '--into', opts.output];
+function import_to_neo4j() {
+    var cmd = import_args.join(' ');
+    console.log('Beginning import process: ', cmd);
+    exec(cmd, function(error, stdout, stderr) {
+        if (error) {
+            console.log('Import failed: ', error);
+        }
+        else {
+            var lines = stdout.split(/\n/);
+            while (lines.length > 0) {
+                line = lines.shift();
+                if (line.indexOf('IMPORT DONE') != -1) {
+                    lines.unshift(line);
+                    break;
+                }
+            }
+            if (lines.length > 0) {
+                console.log(lines.join('\n'));
+            }
+            exec('rm -f out/*.csv', function (error, stdout, stderr) {
+                // don't really care
+            });
+        }
+        record_duration();
+    });
+}
+
+var missing_temple_codes = {};
+var boolean_tag = function(value) {
+    return value ? 'True' : 'False';
+};
 var transformations = {
+    /*
+    TODO:
+        _DATE_TYPE is 2 - what does that mean? What other values are valid?
+        _PLACE_TYPE as well
+    */
+    '_DESC_FLAG': boolean_tag,
+    '_ITALIC': boolean_tag,
+    '_LDS': boolean_tag,
+    '_MASTER': boolean_tag,
+    '_NONE': boolean_tag,
+    '_PAREN': boolean_tag,
+    '_PRIM': boolean_tag,
+    '_PRIMARY': boolean_tag,
     'TEMP': function (value) {
-        return temple_codes[value] || value;
-    }
+        if (temple_codes[value]) {
+            return temple_codes[value];
+        }
+        missing_temple_codes[value] = true;
+        return value;
+    },
 };
 
-var unused_tags = {};
+var csv_writers = {'relationships': {}, 'nodes': {}};
+function write_to_csv(type, tag, data) {
+    var filename = 'out/' + type + '-' + tag + '.csv';
+    if (! csv_writers[type][filename]) {
+        import_args.push('--' + type, filename);
+        var out = fs.createWriteStream(filename, {encoding: 'utf8'});
+        out.on('finish', function () {
+            delete csv_writers[type][filename];
+            if (Object.keys(csv_writers[type]).length === 0) {
+                delete csv_writers[type];
+            }
+            if (Object.keys(csv_writers).length === 0) {
+                record_duration();
+                import_to_neo4j();
+            }
+        });
+        csv_writers[type][filename] = csv.createWriteStream({'headers': true});
+        csv_writers[type][filename].pipe(out);
+    }
+    csv_writers[type][filename].write(data);
+}
 
-function record_to_node(record) {
+function save_relationship(tag, rel_data) {
+    write_to_csv('relationships', tag, rel_data);
+}
+
+function save_node(tag, node_data) {
+    write_to_csv('nodes', tag, node_data);
+}
+
+var unused_tags = {};
+function record_to_node(record, node_id) {
     var node = {};
     if (record['id']) {
-        /*
-        would be nice to figure out how to convert the gedcom id to a graph
-        id in a consistent repeatable manner so we can do updates rather than
-        blowing away the entire db every import
-        maybe 0 offset = I
-              1b offset = F
-              2b offset = ?? (what other record types?)
-        how high can id go? Does node let you specify it on new records?
-        */
-        node['Gedcom Id'] = record['id'];
+        node['Gedcom Id:ID'] = record['id'];
     }
     if (record['children']) {
         var l = record['children'].length;
@@ -56,19 +147,28 @@ function record_to_node(record) {
                 unused_tags[child['name']] = true;
                 continue;
             }
-            if (child['value']) {
+            if (child['value'] !== '' || child['children'].length == 0) {
                 if (child['value'].indexOf('@') == 0) {
-                    // TODO: save the relationship!
-                }
-                if (transformations[child['name']]) {
-                    node[key] = transformations[child['name']](child['value'])
+                    if (node_id) {
+                        var rel_data = {
+                            ':START_ID': node_id,
+                            ':END_ID': child['value'].replace(/@/g, ''),
+                            ':TYPE': key,
+                        };
+                        save_relationship(child['name'], rel_data);
+                    }
                 }
                 else {
-                    node[key] = child['value'];
+                    if (transformations[child['name']]) {
+                        node[key] = transformations[child['name']](child['value'])
+                    }
+                    else {
+                        node[key] = child['value'];
+                    }
                 }
             }
             if (child['children'] && child['children'].length > 0) {
-                var child_obj = record_to_node(child);
+                var child_obj = record_to_node(child, node_id);
                 for (child_key in child_obj) {
                     var composite_key = [key, child_key].join(' ');
                     node[composite_key] = child_obj[child_key];
@@ -79,42 +179,47 @@ function record_to_node(record) {
     return node;
 }
 
-function save_to_graph(node_data, label) {
-    var callback;
-    callback = function (err, node) {
-        if (err) {
-            console.log("Save failed (retrying): " + err)
-            save_to_graph(node_data, label, callback)
-        }
-    }
-    graph.save(node_data, label, callback);
-}
-
 function gedcom_to_graph(record) {
     var label = tag_names[record['name']];
     if (! label) {
-        console.log("Skipping " + record['name'] + ": " + record['id']);
+        console.log('Skipping ' + record['name'] + ': ' + record['id']);
         return;
     }
-    var node_data = record_to_node(record);
-    save_to_graph(node_data, label);
+    var node_data = record_to_node(record, record['id']);
+    if (Object.keys(node_data).length > 0) {
+        node_data[':LABEL'] = label;
+        save_node(record['name'], node_data);
+    }
 }
 
-var start = moment();
+var gedcom = new Gedcom();
 gedcom.on('data', gedcom_to_graph);
 gedcom.on('error', console.log);
 gedcom.on('end', function () {
-    var end = moment();
-    var elapsed = end.diff(start);
-    console.log("Unused tags:");
-    console.log(unused_tags);
+    record_duration();
 
-    console.log("Time elapsed: " + moment.duration(elapsed, 'ms').humanize());
+    for (type in csv_writers) {
+        for (filename in csv_writers[type]) {
+            csv_writers[type][filename].end();
+        }
+    }
+
+    unused_tags = Object.keys(unused_tags);
+    if (unused_tags.length > 0) {
+        console.log('Unused tags: ', unused_tags);
+    }
+
+    missing_temple_codes = Object.keys(missing_temple_codes);
+    if (missing_temple_codes.length > 0) {
+        console.log('Missing temple codes: ', missing_temple_codes);
+    }
 })
 
-if (process.argv.length >= 3) {
-    fs.createReadStream(process.argv[2]).pipe(gedcom);
+if (opts.input) {
+    console.log('Reading from ', opts.input);
+    fs.createReadStream(opts.input).pipe(gedcom);
 }
 else {
-    throw "You must provide a path to a gedcom file as the sole argument";
+    console.log('Reading from STDIN');
+    process.stdin.pipe(gedcom);
 }
