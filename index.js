@@ -1,8 +1,11 @@
-var fs = require('fs');
-var Gedcom = require('gedcom-stream');
-var moment = require('moment');
+var child_process = require('child_process');
+var os = require("os");
+var path = require("path");
+
 var csv = require('fast-csv');
-var exec = require('child_process').exec;
+var fs = require('fs-extra');
+var gedcom_stream = require('gedcom-stream');
+var moment = require('moment');
 
 
 /* TODO:
@@ -12,9 +15,7 @@ var exec = require('child_process').exec;
 - figure out neo4j indexes to speed up lookups
 - export as a library somehow?
 - profile for obvious speed issues
-- store to temp db, stop neo4j, move folders, keep backup of old one, start neo4j again
 - better temp location for csvs
-- rather than opts.importer, opts.neo4jbin to point us to all of the binaries
 - logging?
 - break various pieces out into separate components, looser coupling
 */
@@ -22,22 +23,25 @@ var exec = require('child_process').exec;
 var tag_names = require('./const/tags');
 var temple_codes = require('./const/temples');
 
+var csv_tmp_path = path.join(os.tmpdir(), 'ged2neo-csvs');
+
 var opts = require('nomnom')
     .option('input', {
         abbr: 'i',
         help: 'Path to the gedcom file you want to parse'
     })
-    .option('output', {
+    .option('destination', {
         abbr: 'o',
         required: true,
         help: 'Path to the neo4j data folder you wish to replace'
     })
-    .option('importer', {
-        abbr: 'e',
-        default: 'neo4j-import',
-        help: 'Path to the neo4j-import tool (if not in $PATH)'
+    .option('bindir', {
+        abbr: 'b',
+        default: '/usr/bin',
+        help: 'Path to the location of the neo4j binaries'
     })
     .parse();
+
 
 var start = moment();
 function record_duration() {
@@ -46,32 +50,68 @@ function record_duration() {
     console.log('Time elapsed: ' + moment.duration(elapsed, 'ms').humanize());
 }
 
+var child_process_stdio = ['ignore', process.stdout, process.stderr];
+var neo4j_bin = fs.realpathSync(opts.bindir + '/neo4j');
+/* realpathSync requires files to already exist, how do I just expand the path? */
+var db_paths = {
+    'backup': path.normalize(opts.destination + '.bak'),
+    'temp': path.normalize(opts.destination + '.tmp'),
+    'real': path.normalize(opts.destination),
+};
 
-var import_args = [opts.importer, '--into', opts.output];
-function import_to_neo4j() {
-    var cmd = import_args.join(' ');
-    console.log('Beginning import process: ', cmd);
-    exec(cmd, function(error, stdout, stderr) {
-        if (error) {
-            console.log('Import failed: ', error);
+function manage_neo(command, callback) {
+    var neo_proc = child_process.spawn(neo4j_bin, [command], {
+        'stdio': child_process_stdio
+    });
+    neo_proc.on('close', function (code) {
+        if (code != 0) {
+            throw "neo4j " + command + " failed.  Aborting.";
         }
-        else {
-            var lines = stdout.split(/\n/);
-            while (lines.length > 0) {
-                line = lines.shift();
-                if (line.indexOf('IMPORT DONE') != -1) {
-                    lines.unshift(line);
-                    break;
+        if (callback) {
+            callback();
+        }
+    })
+}
+
+function swap_dirs(callback) {
+    console.log('Swapping temp destination for real one:', db_paths);
+    fs.remove(db_paths['backup'], function (error) {
+        fs.rename(db_paths['real'], db_paths['backup'], function (error) {
+            if (error) { throw error; }
+            fs.rename(db_paths['temp'], db_paths['real'], function (error) {
+                if (error) { throw error; }
+                if (callback) {
+                    callback();
                 }
-            }
-            if (lines.length > 0) {
-                console.log(lines.join('\n'));
-            }
-            exec('rm -f out/*.csv', function (error, stdout, stderr) {
-                // don't really care
+            })
+        })
+    });
+
+}
+
+var import_args = ['--into', db_paths['temp']];
+function import_to_neo4j() {
+    fs.remove(db_paths['temp'], function (error) {
+        fs.mkdir(db_paths['temp'], function (error) {
+            if (error) { throw error; }
+            var cmd = import_args.join(' ');
+            console.log('Beginning import process:', cmd);
+            var import_proc = child_process.spawn(path.join(opts.bindir, 'neo4j-import'), import_args, {
+                'stdio': child_process_stdio
             });
-        }
-        record_duration();
+            import_proc.on('close', function (code) {
+                if (code == 0) {
+                    manage_neo('stop', function() {
+                        swap_dirs(function () {
+                            manage_neo('start', function() {
+                                record_duration();
+                                fs.remove(csv_tmp_path);
+                            });
+                        })
+                    });
+                }
+            });
+        })
     });
 }
 
@@ -104,7 +144,7 @@ var transformations = {
 
 var csv_writers = {'relationships': {}, 'nodes': {}};
 function write_to_csv(type, tag, data) {
-    var filename = 'out/' + type + '-' + tag + '.csv';
+    var filename = path.join(csv_tmp_path, type + '-' + tag + '.csv');
     if (! csv_writers[type][filename]) {
         import_args.push('--' + type, filename);
         var out = fs.createWriteStream(filename, {encoding: 'utf8'});
@@ -136,7 +176,7 @@ var unused_tags = {};
 function record_to_node(record, node_id) {
     var node = {};
     if (record['id']) {
-        node['Gedcom Id:ID'] = record['id'];
+        node['gedcom_stream Id:ID'] = record['id'];
     }
     if (record['children']) {
         var l = record['children'].length;
@@ -182,7 +222,7 @@ function record_to_node(record, node_id) {
 function gedcom_to_graph(record) {
     var label = tag_names[record['name']];
     if (! label) {
-        console.log('Skipping ' + record['name'] + ': ' + record['id']);
+        console.log('Skipping', record['name'], ':', record['id']);
         return;
     }
     var node_data = record_to_node(record, record['id']);
@@ -192,7 +232,7 @@ function gedcom_to_graph(record) {
     }
 }
 
-var gedcom = new Gedcom();
+var gedcom = new gedcom_stream();
 gedcom.on('data', gedcom_to_graph);
 gedcom.on('error', console.log);
 gedcom.on('end', function () {
@@ -213,13 +253,20 @@ gedcom.on('end', function () {
     if (missing_temple_codes.length > 0) {
         console.log('Missing temple codes: ', missing_temple_codes);
     }
-})
+});
 
-if (opts.input) {
-    console.log('Reading from ', opts.input);
-    fs.createReadStream(opts.input).pipe(gedcom);
-}
-else {
-    console.log('Reading from STDIN');
-    process.stdin.pipe(gedcom);
-}
+fs.mkdir(csv_tmp_path, function (error) {
+    if (error['code'] !== 'EEXIST') {
+        throw error;
+    }
+
+    if (opts.input) {
+        var gedcom_path = fs.realpathSync(opts.input);
+        console.log('Reading from', gedcom_path);
+        fs.createReadStream(gedcom_path).pipe(gedcom);
+    }
+    else {
+        console.log('Reading from STDIN');
+        process.stdin.pipe(gedcom);
+    }
+});
