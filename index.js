@@ -1,10 +1,5 @@
-var os = require('os');
-var path = require('path');
-
-var csv = require('fast-csv');
 var fs = require('fs-extra');
 var GedcomStream = require('gedcom-stream');
-var moment = require('moment');
 
 var Timer = require('./lib/timer');
 var Neo4J = require('./lib/neo4j');
@@ -38,64 +33,26 @@ var opts = require('nomnom')
     .parse();
 
 var timer = new Timer();
-var neo4j = new Neo4J(opts.bindir);
+var neo4j = new Neo4J(opts.bindir, opts.destination);
 var csvs = new CsvWriter();
 var gedcom = new GedcomStream();
 
-
-/* realpathSync requires files to already exist, how do I just expand the path? */
-var db_paths = {
-    'backup': path.normalize(opts.destination + '.bak'),
-    'temp': path.normalize(opts.destination + '.tmp'),
-    'real': path.normalize(opts.destination),
-};
-
-function swap_dirs(callback) {
-    console.log('Swapping temp destination for real one:', db_paths);
-    fs.remove(db_paths['backup'], function (error) {
-        fs.rename(db_paths['real'], db_paths['backup'], function (error) {
-            if (error) { throw error; }
-            fs.rename(db_paths['temp'], db_paths['real'], function (error) {
-                if (error) { throw error; }
-                if (callback) {
-                    callback();
-                }
-            })
-        })
-    });
-
-}
-
-
 neo4j.on('manage', console.log);
-neo4j.on('startEnd', function (code) {
-    if (code != 0) {
-        throw 'Starting neo4j failed.  Abort.';
-    }
+neo4j.on('start', function (path, args) {
+    console.log('Beginning import process:', path, args);
+});
+neo4j.on('swapping', function (src, dest) {
+    console.log('Moving folder:', src, '->', dest);
+});
+neo4j.on('finish', function (path, args) {
     timer.log();
     csvs.cleanup();
 });
-neo4j.on('stopEnd', function (code) {
-    swap_dirs(function () {
-        neo4j.start();
-    });
-});
-neo4j.on('importBegin', function (path, args) {
-    console.log('Beginning import process:', path, args);
-});
-neo4j.on('importEnd', function (path, args, code) {
-    if (code === 0) {
-        neo4j.stop();
-    }
-    else {
-        throw 'Import failed. Exited ' + code + '. Abort.';
-    }
-});
 
+var import_args = [];
 csvs.on('skip', function (record) {
     console.log('Skipping', record);
 });
-var import_args = ['--into', db_paths['temp']];
 csvs.on('generate', function (type, path) {
     console.log('Generating temporary csv file:', path);
     import_args.push('--' + type, path);
@@ -104,13 +61,8 @@ csvs.on('missing', function (type, missing) {
     console.log('Missing', type, missing);
 });
 csvs.on('finish', function () {
-    fs.remove(db_paths['temp'], function (error) {
-        fs.mkdir(db_paths['temp'], function (error) {
-            if (error) { throw error; }
-            timer.log();
-            neo4j.import(import_args);
-        })
-    });
+    timer.log();
+    neo4j.import(import_args);
 });
 
 gedcom.on('error', console.log);
