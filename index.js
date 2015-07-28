@@ -1,3 +1,6 @@
+var path = require('path');
+var os = require('os');
+
 var fs = require('fs-extra');
 var GedcomStream = require('gedcom-stream');
 
@@ -6,12 +9,12 @@ var Neo4J = require('./lib/neo4j');
 var CsvWriter = require('./lib/csv_writer');
 
 var opts = require('nomnom')
-    .option('input', {
-        abbr: 'i',
+    .option('src', {
+        abbr: 's',
         help: 'Path to the gedcom file you want to parse'
     })
-    .option('destination', {
-        abbr: 'o',
+    .option('dest', {
+        abbr: 'd',
         required: true,
         help: 'Path to the neo4j data folder you wish to replace'
     })
@@ -20,11 +23,28 @@ var opts = require('nomnom')
         default: '/usr/bin',
         help: 'Path to the location of the neo4j binaries'
     })
+    .option('tmpdir', {
+        abbr: 't',
+        default: path.join(os.tmpdir(), 'ged2neo-csvs'),
+        help: 'Folder for the temporary CSV files'
+    })
+    .option('quiet', {
+        abbr: 'q',
+        flag: true,
+        default: false,
+        help: 'Suppress output other than errors'
+    })
+    .option('verbose', {
+        abbr: 'v',
+        flag: true,
+        default: false,
+        help: 'Include debug output'
+    })
     .parse();
 
 var timer = new Timer();
-var neo4j = new Neo4J(opts.bindir, opts.destination);
-var csvs = new CsvWriter();
+var neo4j = new Neo4J(opts.bindir, opts.dest);
+var csvs = new CsvWriter(opts.tmpdir);
 var gedcom = new GedcomStream();
 
 neo4j.on('manage', console.log);
@@ -62,8 +82,8 @@ gedcom.on('end', function () {
 });
 gedcom.pipe(csvs);
 
-if (opts.input) {
-    var gedcom_path = fs.realpathSync(opts.input);
+if (opts.src) {
+    var gedcom_path = fs.realpathSync(opts.src);
     console.log('Reading from', gedcom_path);
     fs.createReadStream(gedcom_path).pipe(gedcom);
 }
