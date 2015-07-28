@@ -3,6 +3,7 @@ var os = require('os');
 
 var fs = require('fs-extra');
 var GedcomStream = require('gedcom-stream');
+var log4js = require('log4js');
 
 var Timer = require('./lib/timer');
 var Neo4J = require('./lib/neo4j');
@@ -42,52 +43,72 @@ var opts = require('nomnom')
     })
     .parse();
 
+
+log4js.configure({
+    appenders: [
+        { type: "console" }
+    ],
+    replaceConsole: true
+});
+
+var logger = log4js.getLogger();
+if (opts.quiet) {
+    logger.setLevel('ERROR');
+}
+else if (! opts.verbose) {
+    logger.setLevel('INFO');
+}
+
+
 var timer = new Timer();
 var neo4j = new Neo4J(opts.bindir, opts.dest);
 var csvs = new CsvWriter(opts.tmpdir);
 var gedcom = new GedcomStream();
 
-neo4j.on('manage', console.log);
-neo4j.on('start', function (path, args) {
-    console.log('Beginning import process:', path, args);
-});
-neo4j.on('swapping', function (src, dest) {
-    console.log('Moving folder:', src, '->', dest);
-});
-neo4j.on('finish', function (path, args) {
-    timer.log();
-    csvs.cleanup();
-});
-
-var import_args = [];
-csvs.on('skip', function (record) {
-    console.log('Skipping', record);
-});
-csvs.on('generate', function (type, path) {
-    console.log('Generating temporary csv file:', path);
-    import_args.push('--' + type, path);
-});
-csvs.on('missing', function (type, missing) {
-    console.log('Missing', type, missing);
-});
-csvs.on('finish', function () {
-    timer.log();
-    neo4j.import(import_args);
-});
-
-gedcom.on('error', console.log);
+gedcom.on('error', logger.error);
 gedcom.on('end', function () {
-    timer.log();
+    logger.info('Finished parsing gedcom file. Time elapsed:', timer.snap());
     csvs.end();
 });
 gedcom.pipe(csvs);
 
+
+var import_args = [];
+csvs.on('generate', function (type, path) {
+    logger.debug('Generating temporary csv file:', path);
+    import_args.push('--' + type, path);
+});
+csvs.on('skip', function (record) {
+    logger.warn('Skipping', record);
+});
+csvs.on('missing', function (type, missing) {
+    logger.warn('Missing', type, missing);
+});
+csvs.on('finish', function () {
+    logger.info('Finished writing intermediate csv files. Time elapsed:', timer.snap());
+    neo4j.import(import_args);
+});
+
+
+neo4j.on('manage', logger.debug);
+neo4j.on('start', function (path, args) {
+    logger.debug('Beginning import process:', path, args);
+});
+neo4j.on('swapping', function (src, dest) {
+    logger.debug('Moving folder:', src, '->', dest);
+});
+neo4j.on('finish', function (path, args) {
+    logger.info('Finished importing and restarting neo4j. Time elapsed:', timer.snap());
+    csvs.cleanup();
+});
+
+
 if (opts.src) {
     var gedcom_path = fs.realpathSync(opts.src);
-    console.log('Reading from', gedcom_path);
+    logger.info('Reading from', gedcom_path);
     fs.createReadStream(gedcom_path).pipe(gedcom);
 }
 else {
-    console.log('Reading from STDIN');
+    logger.info('Reading from STDIN');
     process.stdin.pipe(gedcom);
 }
