@@ -5,16 +5,6 @@ var Timer = require('./lib/timer');
 var Neo4J = require('./lib/neo4j');
 var CsvWriter = require('./lib/csv_writer');
 
-
-/* TODO:
-- figure out if neo4j has any special date types that we could leverage
-- better code organization, more custom tag parsers
-    - NAME should split into given and surname probably
-- figure out neo4j indexes to speed up lookups
-- profile for obvious speed issues
-- logging?
-*/
-
 var opts = require('nomnom')
     .option('input', {
         abbr: 'i',
