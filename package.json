@@ -1,0 +1,32 @@
+{
+    "name": "gedcom-graph",
+    "version": "0.1.0",
+    "description": "Converts a GEDCOM file to a neo4j graph database",
+    "main": "index.js",
+    "scripts": {
+        "test": ""
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/jimbobhickville/node-gedcom-graph"
+    },
+    "keywords": [
+        "gedcom",
+        "genealogy",
+        "graph",
+        "database",
+        "neo4j"
+    ],
+    "author": "Greg Hill <jimbobhickville@gmail.com>",
+    "license": "MIT",
+    "dependencies": {
+        "gedcom-stream": "",
+        "moment": "",
+        "fast-csv": "",
+        "fs-extra": "",
+        "nomnom": "",
+        "log4js": ""
+    },
+    "devDependencies": {
+    }
+}
