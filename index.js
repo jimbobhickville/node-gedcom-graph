@@ -65,7 +65,7 @@ var neo4j = new Neo4J(opts.bindir, opts.dest);
 var csvs = new CsvWriter(opts.tmpdir);
 var gedcom = new GedcomStream();
 
-gedcom.on('error', logger.error);
+gedcom.on('error', logger.error.bind(logger));
 gedcom.on('end', function () {
     logger.info('Finished parsing gedcom file. Time elapsed:', timer.snap());
     csvs.end();
@@ -90,9 +90,10 @@ csvs.on('finish', function () {
 });
 
 
-neo4j.on('manage', logger.debug);
+neo4j.on('manage', logger.debug.bind(logger));
 neo4j.on('start', function (path, args) {
-    logger.debug('Beginning import process:', path, args);
+    logger.info('Beginning import process:', path);
+    logger.debug('With args:', args);
 });
 neo4j.on('swapping', function (src, dest) {
     logger.debug('Moving folder:', src, '->', dest);
