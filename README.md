@@ -53,7 +53,3 @@ If something fails between steps 5 and 8, the backup is moved back into place, s
 3. Automatically run tests in Travis CI on PR
 4. Add indexes to generated nodes
 5. Convert dates to more useful format
-6. Split name into given/surname
-7. Configure logger format to something more useful
-8. Redirect output from child_process to logger.
-

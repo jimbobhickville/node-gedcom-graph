@@ -8,6 +8,7 @@ var log4js = require('log4js');
 var Timer = require('./lib/timer');
 var Neo4J = require('./lib/neo4j');
 var CsvWriter = require('./lib/csv_writer');
+var LogStreamer = require('./lib/log_streamer');
 
 var opts = require('nomnom')
     .option('src', {
@@ -60,6 +61,9 @@ else if (! opts.verbose) {
 }
 
 
+var debug_streamer = new LogStreamer(logger.debug.bind(logger));
+var warn_streamer = new LogStreamer(logger.warn.bind(logger));
+
 var timer = new Timer();
 var neo4j = new Neo4J(opts.bindir, opts.dest);
 var csvs = new CsvWriter(opts.tmpdir);
@@ -101,6 +105,12 @@ neo4j.on('swapping', function (src, dest) {
 neo4j.on('finish', function (path, args) {
     logger.info('Finished importing and restarting neo4j. Time elapsed:', timer.snap());
     csvs.cleanup();
+});
+neo4j.on('stdout', function (stdout) {
+    stdout.pipe(debug_streamer);
+});
+neo4j.on('stderr', function (stderr) {
+    stderr.pipe(warn_streamer);
 });
 
 
