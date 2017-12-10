@@ -46,20 +46,24 @@ var opts = require('nomnom')
 
 
 log4js.configure({
-    appenders: [
-        { type: "console" }
-    ],
-    replaceConsole: true
+  appenders: {
+    access: { type: 'dateFile', filename: 'log/access.log', pattern: '-yyyy-MM-dd' },
+    app: { type: 'file', filename: 'log/app.log', maxLogSize: 10485760, numBackups: 3 },
+    errorFile: { type: 'file', filename: 'log/errors.log' },
+    errors: { type: 'logLevelFilter', level: 'error', appender: 'errorFile' }
+  },
+  categories: {
+    default: { appenders: ['app', 'errors'], level: 'info' },
+    http: { appenders: ['access'], level: 'info' }
+  }
 });
-
 var logger = log4js.getLogger();
 if (opts.quiet) {
-    logger.setLevel('ERROR');
+    logger.level = 'debug';
 }
 else if (! opts.verbose) {
-    logger.setLevel('INFO');
+    logger.level = 'debug';
 }
-
 
 var debug_streamer = new LogStreamer(logger.debug.bind(logger));
 var warn_streamer = new LogStreamer(logger.warn.bind(logger));

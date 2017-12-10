@@ -26,6 +26,7 @@ var tag_names = {
     '_STAT': 'Status',
     '_TYPE': 'File Type',
     '_UID': 'Universally Unique ID',
+    '_UPD': 'Updated',
     /* Standard tags */
     'ABBR': 'Abbreviation',
     'ADDR': 'Address',
